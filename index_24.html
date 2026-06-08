@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32 Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.3.4/mqtt.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@300;500;600&display=swap');
+  :root { --on:#00ffaa; --bg:#0a0a0f; --panel:#11111c; --border:#1e1e32; --text:#c8c8e0; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { height:100%; overflow:hidden; background:var(--bg); font-family:'Rajdhani',sans-serif; color:var(--text); }
+  body::before {
+    content:''; position:fixed; inset:0;
+    background-image: linear-gradient(rgba(0,255,170,0.03) 1px,transparent 1px), linear-gradient(90deg,rgba(0,255,170,0.03) 1px,transparent 1px);
+    background-size:40px 40px; pointer-events:none; z-index:0;
+  }
+  .page {
+    position:relative; z-index:1; height:100vh;
+    display:grid; grid-template-rows:44px 1fr; gap:10px; padding:12px 16px;
+  }
+
+  header { display:flex; align-items:center; justify-content:space-between; }
+  header h1 { font-family:'Share Tech Mono',monospace; font-size:0.85rem; letter-spacing:0.3em; color:rgba(200,200,224,0.35); text-transform:uppercase; }
+  .conn-bar { display:flex; align-items:center; gap:8px; font-family:'Share Tech Mono',monospace; font-size:0.65rem; letter-spacing:0.12em; color:rgba(200,200,224,0.3); }
+  .dot { width:7px; height:7px; border-radius:50%; background:#333; transition:all 0.3s; }
+  .dot.connected { background:var(--on); box-shadow:0 0 7px rgba(0,255,170,0.8); animation:blink 2s ease-in-out infinite; }
+  .dot.disconnected { background:#ff4466; }
+  .dot.connecting  { background:#ffaa00; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.35} }
+
+  .main { display:grid; grid-template-columns:1fr 1fr; gap:16px; height:100%; min-height:0; }
+
+  .card {
+    background:var(--panel); border:1px solid var(--border); border-radius:12px;
+    padding:20px; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; gap:16px; min-height:0; overflow:hidden;
+  }
+  .card-label { font-family:'Share Tech Mono',monospace; font-size:0.65rem; letter-spacing:0.25em; text-transform:uppercase; color:rgba(200,200,224,0.3); align-self:flex-start; }
+
+  /* ── LED card ── */
+  .bulb {
+    width:110px; height:110px; border-radius:50%; border:2px solid var(--border);
+    background:#0d0d18; position:relative; transition:all 0.4s cubic-bezier(0.23,1,0.32,1);
+    display:flex; align-items:center; justify-content:center;
+  }
+  .bulb::before { content:''; width:52px; height:52px; border-radius:50%; background:#1a1a2e; transition:all 0.4s cubic-bezier(0.23,1,0.32,1); }
+  .bulb.on { border-color:var(--on); box-shadow:0 0 28px rgba(0,255,170,0.4),0 0 70px rgba(0,255,170,0.15),inset 0 0 30px rgba(0,255,170,0.1); }
+  .bulb.on::before { background:var(--on); box-shadow:0 0 18px rgba(0,255,170,0.9),0 0 45px rgba(0,255,170,0.4); }
+  .bulb.on::after { content:''; position:absolute; inset:-12px; border-radius:50%; border:1px solid rgba(0,255,170,0.22); animation:pulse 2s ease-out infinite; }
+  @keyframes pulse { 0%{transform:scale(1);opacity:0.55} 100%{transform:scale(1.3);opacity:0} }
+
+  .led-status { font-family:'Share Tech Mono',monospace; font-size:1.6rem; letter-spacing:0.2em; transition:color 0.4s; }
+  .led-status.on { color:var(--on); } .led-status.off { color:rgba(200,200,224,0.2); }
+
+  .controls { display:flex; gap:10px; }
+  .btn { font-family:'Share Tech Mono',monospace; font-size:0.65rem; letter-spacing:0.12em; padding:8px 18px; border-radius:4px; cursor:pointer; text-transform:uppercase; transition:all 0.18s; border:1px solid; }
+  .btn-on  { background:rgba(0,255,170,0.08); border-color:rgba(0,255,170,0.35); color:var(--on); }
+  .btn-on:hover  { background:rgba(0,255,170,0.18); }
+  .btn-off { background:rgba(200,200,224,0.04); border-color:rgba(200,200,224,0.18); color:rgba(200,200,224,0.4); }
+  .btn-off:hover { background:rgba(200,200,224,0.09); color:rgba(200,200,224,0.7); }
+  .btn:active { transform:scale(0.95); }
+  .btn:disabled { opacity:0.3; cursor:not-allowed; }
+
+  /* ── Gauge card ── */
+  .gauge-wrap { position:relative; width:260px; height:160px; flex-shrink:0; }
+  canvas#gauge { width:100%; height:100%; }
+
+  .gauge-value {
+    position:absolute; bottom:10px; left:50%; transform:translateX(-50%);
+    font-family:'Share Tech Mono',monospace; font-size:2rem; letter-spacing:0.05em;
+    color:#f0c040; text-shadow:0 0 16px rgba(240,192,64,0.5);
+    text-align:center; white-space:nowrap;
+  }
+  .gauge-unit { font-size:0.75rem; opacity:0.5; margin-left:3px; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header>
+    <h1>ESP32 &nbsp;/&nbsp; Dashboard</h1>
+    <div class="conn-bar">
+      <div class="dot connecting" id="dot"></div>
+      <span id="connLabel">CONNECTING...</span>
+    </div>
+  </header>
+
+  <div class="main">
+
+    <!-- LED Card -->
+    <div class="card">
+      <div class="card-label">LED Control</div>
+      <div class="bulb" id="bulb"></div>
+      <div class="led-status off" id="ledStatus">OFF</div>
+      <div class="controls">
+        <button class="btn btn-on"  id="btnOn"  onclick="send('ON')"  disabled>ON</button>
+        <button class="btn btn-off" id="btnOff" onclick="send('OFF')" disabled>OFF</button>
+      </div>
+    </div>
+
+    <!-- Gauge Card -->
+    <div class="card">
+      <div class="card-label">Brightness Level</div>
+      <div class="gauge-wrap">
+        <canvas id="gauge" width="260" height="160"></canvas>
+        <div class="gauge-value"><span id="gaugeVal">0</span><span class="gauge-unit">%</span></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+  const TOPIC_STATE   = 'hpone_esp32_001/led/state';
+  const TOPIC_COMMAND = 'hpone_esp32_001/led/command';
+  const TOPIC_POT     = 'hpone_esp32_001/pot/level';
+
+  const dot       = document.getElementById('dot');
+  const connLabel = document.getElementById('connLabel');
+  const btnOn     = document.getElementById('btnOn');
+  const btnOff    = document.getElementById('btnOff');
+  const bulb      = document.getElementById('bulb');
+  const ledStatus = document.getElementById('ledStatus');
+  const gaugeVal  = document.getElementById('gaugeVal');
+  const canvas    = document.getElementById('gauge');
+  const ctx       = canvas.getContext('2d');
+
+  let currentLevel = 0;
+  let targetLevel  = 0;
+  let animFrame;
+
+  // ── Gauge drawing ──
+  function drawGauge(pct) {
+    const W = canvas.width, H = canvas.height;
+    const cx = W / 2, cy = H - 10;
+    const r  = 120;
+    // 0% = left (180deg), 100% = right (0deg), needle sweeps left to right
+    const valueAngle = Math.PI - (pct / 100) * Math.PI;
+
+    ctx.clearRect(0, 0, W, H);
+
+    // tick marks
+    for (let i = 0; i <= 10; i++) {
+      const a = Math.PI - (i / 10) * Math.PI;
+      const isMajor = i % 2 === 0;
+      const len = isMajor ? 14 : 8;
+      const x1 = cx + (r - 4) * Math.cos(a);
+      const y1 = cy + (r - 4) * Math.sin(a);
+      const x2 = cx + (r - 4 - len) * Math.cos(a);
+      const y2 = cy + (r - 4 - len) * Math.sin(a);
+      ctx.beginPath();
+      ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+      ctx.strokeStyle = isMajor ? 'rgba(200,200,224,0.4)' : 'rgba(200,200,224,0.18)';
+      ctx.lineWidth = isMajor ? 2 : 1;
+      ctx.stroke();
+
+      if (isMajor) {
+        const lx = cx + (r - 26) * Math.cos(a);
+        const ly = cy + (r - 26) * Math.sin(a);
+        ctx.font = '10px Share Tech Mono, monospace';
+        ctx.fillStyle = 'rgba(200,200,224,0.35)';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(i * 10, lx, ly);
+      }
+    }
+
+    // track bg full semicircle
+    ctx.beginPath();
+    ctx.arc(cx, cy, r - 18, 0, Math.PI, true);
+    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+    ctx.lineWidth = 10; ctx.lineCap = 'round';
+    ctx.stroke();
+
+    // colored arc from left up to current value
+    if (pct > 0) {
+      const grad = ctx.createLinearGradient(cx - r, cy, cx + r, cy);
+      grad.addColorStop(0,   '#00ffaa');
+      grad.addColorStop(0.5, '#f0c040');
+      grad.addColorStop(1,   '#ff4466');
+      ctx.beginPath();
+      ctx.arc(cx, cy, r - 18, valueAngle, Math.PI, true);
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = 10; ctx.lineCap = 'round';
+      ctx.stroke();
+    }
+
+    // needle points from center toward valueAngle
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(valueAngle);
+    ctx.beginPath();
+    ctx.moveTo(0, 5); ctx.lineTo(-(r - 30), 0); ctx.lineTo(0, -5);
+    ctx.fillStyle = '#f0c040';
+    ctx.shadowColor = 'rgba(240,192,64,0.7)';
+    ctx.shadowBlur = 10;
+    ctx.fill();
+    ctx.restore();
+
+    // center dot
+    ctx.beginPath();
+    ctx.arc(cx, cy, 8, 0, Math.PI * 2);
+    ctx.fillStyle = '#1e1e32';
+    ctx.shadowColor = 'rgba(240,192,64,0.5)';
+    ctx.shadowBlur = 8;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+    ctx.fillStyle = '#f0c040';
+    ctx.fill();
+  }
+
+  function animateGauge() {
+    const diff = targetLevel - currentLevel;
+    if (Math.abs(diff) < 0.5) { currentLevel = targetLevel; }
+    else { currentLevel += diff * 0.12; }
+    drawGauge(currentLevel);
+    gaugeVal.textContent = Math.round(currentLevel);
+    animFrame = requestAnimationFrame(animateGauge);
+  }
+  animateGauge();
+
+  // ── MQTT ──
+  const client = mqtt.connect('wss://broker.hivemq.com:8884/mqtt', {
+    clientId: 'web_hpone_' + Math.random().toString(16).slice(2,8), clean:true
+  });
+
+  client.on('connect', () => {
+    dot.className='dot connected'; connLabel.textContent='CONNECTED · HiveMQ';
+    btnOn.disabled=false; btnOff.disabled=false;
+    client.subscribe(TOPIC_STATE);
+    client.subscribe(TOPIC_POT);
+  });
+
+  client.on('offline', () => {
+    dot.className='dot disconnected'; connLabel.textContent='DISCONNECTED';
+    btnOn.disabled=true; btnOff.disabled=true;
+  });
+
+  client.on('message', (topic, message) => {
+    const val = message.toString().trim();
+    if (topic === TOPIC_STATE) {
+      if (val === 'ON') { bulb.className='bulb on'; ledStatus.textContent='ON'; ledStatus.className='led-status on'; }
+      else              { bulb.className='bulb';    ledStatus.textContent='OFF'; ledStatus.className='led-status off'; }
+    }
+    if (topic === TOPIC_POT) { targetLevel = parseFloat(val); }
+  });
+
+  function send(cmd) { if(client.connected) client.publish(TOPIC_COMMAND, cmd); }
+</script>
+</body>
+</html>
