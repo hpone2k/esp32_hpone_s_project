@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32 Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.3.4/mqtt.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@300;500;600&display=swap');
+  :root {
+    --on:#00ffaa; --bg:#0a0a0f; --panel:#11111c; --border:#1e1e32;
+    --text:#c8c8e0; --temp:#ff6b6b; --humid:#4ecdc4;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+
+  html, body {
+    height:100%; overflow:hidden;
+    background:var(--bg); font-family:'Rajdhani',sans-serif; color:var(--text);
+  }
+
+  body::before {
+    content:''; position:fixed; inset:0;
+    background-image:
+      linear-gradient(rgba(0,255,170,0.03) 1px,transparent 1px),
+      linear-gradient(90deg,rgba(0,255,170,0.03) 1px,transparent 1px);
+    background-size:40px 40px; pointer-events:none; z-index:0;
+  }
+
+  .page {
+    position:relative; z-index:1;
+    height:100vh;
+    display:grid;
+    grid-template-rows:44px 1fr;
+    grid-template-columns:1fr;
+    gap:10px;
+    padding:12px 16px;
+  }
+
+  /* ── Header ── */
+  header {
+    display:flex; align-items:center; justify-content:space-between;
+  }
+  header h1 {
+    font-family:'Share Tech Mono',monospace;
+    font-size:0.85rem; letter-spacing:0.3em;
+    color:rgba(200,200,224,0.35); text-transform:uppercase;
+  }
+  .conn-bar { display:flex; align-items:center; gap:8px; font-family:'Share Tech Mono',monospace; font-size:0.65rem; letter-spacing:0.12em; color:rgba(200,200,224,0.3); }
+  .dot { width:7px; height:7px; border-radius:50%; background:#333; transition:all 0.3s; }
+  .dot.connected { background:var(--on); box-shadow:0 0 7px rgba(0,255,170,0.8); animation:blink 2s ease-in-out infinite; }
+  .dot.disconnected { background:#ff4466; }
+  .dot.connecting  { background:#ffaa00; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.35} }
+
+  /* ── Main grid ── */
+  .main {
+    display:grid;
+    grid-template-columns:200px 1fr 1fr;
+    grid-template-rows:1fr 1fr;
+    gap:10px;
+    height:100%;
+    min-height:0;
+  }
+
+  /* LED spans 2 rows */
+  .led-card {
+    grid-row: 1 / 3;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px;
+  }
+
+  /* ── Card base ── */
+  .card {
+    background:var(--panel); border:1px solid var(--border);
+    border-radius:10px; padding:14px; display:flex; flex-direction:column; gap:8px;
+    min-height:0; overflow:hidden;
+  }
+  .card-label {
+    font-family:'Share Tech Mono',monospace; font-size:0.62rem;
+    letter-spacing:0.22em; text-transform:uppercase; color:rgba(200,200,224,0.3);
+    flex-shrink:0;
+  }
+
+  /* ── LED ── */
+  .bulb {
+    width:88px; height:88px; border-radius:50%; border:2px solid var(--border);
+    background:#0d0d18; position:relative; transition:all 0.4s cubic-bezier(0.23,1,0.32,1);
+    display:flex; align-items:center; justify-content:center; flex-shrink:0;
+  }
+  .bulb::before { content:''; width:42px; height:42px; border-radius:50%; background:#1a1a2e; transition:all 0.4s cubic-bezier(0.23,1,0.32,1); }
+  .bulb.on { border-color:var(--on); box-shadow:0 0 22px rgba(0,255,170,0.4),0 0 55px rgba(0,255,170,0.15),inset 0 0 24px rgba(0,255,170,0.1); }
+  .bulb.on::before { background:var(--on); box-shadow:0 0 14px rgba(0,255,170,0.9),0 0 36px rgba(0,255,170,0.4); }
+  .bulb.on::after { content:''; position:absolute; inset:-10px; border-radius:50%; border:1px solid rgba(0,255,170,0.22); animation:pulse 2s ease-out infinite; }
+  @keyframes pulse { 0%{transform:scale(1);opacity:0.55} 100%{transform:scale(1.3);opacity:0} }
+
+  .led-status { font-family:'Share Tech Mono',monospace; font-size:1.3rem; letter-spacing:0.2em; transition:color 0.4s; }
+  .led-status.on { color:var(--on); } .led-status.off { color:rgba(200,200,224,0.2); }
+
+  .controls { display:flex; gap:8px; }
+  .btn {
+    font-family:'Share Tech Mono',monospace; font-size:0.62rem; letter-spacing:0.12em;
+    padding:7px 14px; border-radius:4px; cursor:pointer; text-transform:uppercase;
+    transition:all 0.18s; border:1px solid;
+  }
+  .btn-on  { background:rgba(0,255,170,0.08); border-color:rgba(0,255,170,0.35); color:var(--on); }
+  .btn-on:hover  { background:rgba(0,255,170,0.16); }
+  .btn-off { background:rgba(200,200,224,0.04); border-color:rgba(200,200,224,0.18); color:rgba(200,200,224,0.4); }
+  .btn-off:hover { background:rgba(200,200,224,0.09); color:rgba(200,200,224,0.7); }
+  .btn:active { transform:scale(0.95); }
+  .btn:disabled { opacity:0.3; cursor:not-allowed; }
+
+  /* ── Sensor widget ── */
+  .sensor-row { display:flex; align-items:flex-end; gap:6px; flex-shrink:0; }
+  .sensor-value { font-family:'Share Tech Mono',monospace; font-size:2.2rem; line-height:1; font-weight:600; }
+  .sensor-value.temp  { color:var(--temp); text-shadow:0 0 16px rgba(255,107,107,0.35); }
+  .sensor-value.humid { color:var(--humid); text-shadow:0 0 16px rgba(78,205,196,0.35); }
+  .sensor-unit { font-family:'Share Tech Mono',monospace; font-size:0.9rem; opacity:0.55; padding-bottom:4px; }
+
+  .bar-wrap { width:100%; height:5px; background:rgba(255,255,255,0.05); border-radius:3px; overflow:hidden; flex-shrink:0; }
+  .bar-fill { height:100%; border-radius:3px; transition:width 0.8s cubic-bezier(0.23,1,0.32,1); }
+  .bar-fill.temp  { background:linear-gradient(90deg,#ff6b6b,#ffd93d); }
+  .bar-fill.humid { background:linear-gradient(90deg,#4ecdc4,#45b7d1); }
+  .bar-range { display:flex; justify-content:space-between; font-family:'Share Tech Mono',monospace; font-size:0.58rem; color:rgba(200,200,224,0.2); flex-shrink:0; }
+  .last-update { font-family:'Share Tech Mono',monospace; font-size:0.58rem; color:rgba(200,200,224,0.18); flex-shrink:0; }
+
+  /* ── Chart ── */
+  .chart-wrap { position:relative; flex:1; min-height:0; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header>
+    <h1>ESP32 &nbsp;/&nbsp; Dashboard</h1>
+    <div class="conn-bar">
+      <div class="dot connecting" id="dot"></div>
+      <span id="connLabel">CONNECTING...</span>
+    </div>
+  </header>
+
+  <div class="main">
+
+    <!-- LED — spans 2 rows -->
+    <div class="card led-card">
+      <div class="card-label">LED Control</div>
+      <div class="bulb" id="bulb"></div>
+      <div class="led-status off" id="ledStatus">OFF</div>
+      <div class="controls">
+        <button class="btn btn-on"  id="btnOn"  onclick="send('ON')"  disabled>ON</button>
+        <button class="btn btn-off" id="btnOff" onclick="send('OFF')" disabled>OFF</button>
+      </div>
+    </div>
+
+    <!-- Temperature widget -->
+    <div class="card">
+      <div class="card-label">Temperature</div>
+      <div class="sensor-row">
+        <span class="sensor-value temp" id="tempVal">--</span>
+        <span class="sensor-unit" style="color:var(--temp)">°C</span>
+      </div>
+      <div class="bar-wrap"><div class="bar-fill temp" id="tempBar" style="width:0%"></div></div>
+      <div class="bar-range"><span>0°C</span><span>50°C</span></div>
+      <div class="last-update" id="tempTime">No data yet</div>
+    </div>
+
+    <!-- Humidity widget -->
+    <div class="card">
+      <div class="card-label">Humidity</div>
+      <div class="sensor-row">
+        <span class="sensor-value humid" id="humidVal">--</span>
+        <span class="sensor-unit" style="color:var(--humid)">%</span>
+      </div>
+      <div class="bar-wrap"><div class="bar-fill humid" id="humidBar" style="width:0%"></div></div>
+      <div class="bar-range"><span>0%</span><span>100%</span></div>
+      <div class="last-update" id="humidTime">No data yet</div>
+    </div>
+
+    <!-- Temp chart -->
+    <div class="card" style="padding:12px;">
+      <div class="card-label">Temperature History</div>
+      <div class="chart-wrap"><canvas id="tempChart"></canvas></div>
+    </div>
+
+    <!-- Humid chart -->
+    <div class="card" style="padding:12px;">
+      <div class="card-label">Humidity History</div>
+      <div class="chart-wrap"><canvas id="humidChart"></canvas></div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+  const TOPIC_STATE   = 'hpone_esp32_001/led/state';
+  const TOPIC_COMMAND = 'hpone_esp32_001/led/command';
+  const TOPIC_TEMP    = 'hpone_esp32_001/sensor/temp';
+  const TOPIC_HUMID   = 'hpone_esp32_001/sensor/humidity';
+  const MAX_POINTS    = 20;
+
+  const dot       = document.getElementById('dot');
+  const connLabel = document.getElementById('connLabel');
+  const btnOn     = document.getElementById('btnOn');
+  const btnOff    = document.getElementById('btnOff');
+  const bulb      = document.getElementById('bulb');
+  const ledStatus = document.getElementById('ledStatus');
+
+  const chartCfg = (color, label, yMin, yMax) => ({
+    type: 'line',
+    data: { labels:[], datasets:[{ label, data:[], borderColor:color, backgroundColor:color+'15',
+      borderWidth:1.5, pointRadius:2, pointBackgroundColor:color, tension:0.4, fill:true }] },
+    options: {
+      responsive:true, maintainAspectRatio:false, animation:{ duration:400 },
+      plugins:{ legend:{ display:false } },
+      scales:{
+        x:{ ticks:{ color:'rgba(200,200,224,0.25)', font:{family:'Share Tech Mono',size:8}, maxTicksLimit:5 }, grid:{ color:'rgba(255,255,255,0.03)' } },
+        y:{ min:yMin, max:yMax, ticks:{ color:'rgba(200,200,224,0.25)', font:{family:'Share Tech Mono',size:8} }, grid:{ color:'rgba(255,255,255,0.03)' } }
+      }
+    }
+  });
+
+  const tempChart  = new Chart(document.getElementById('tempChart'),  chartCfg('#ff6b6b','Temp °C', 0, 50));
+  const humidChart = new Chart(document.getElementById('humidChart'), chartCfg('#4ecdc4','Humidity %', 0, 100));
+
+  function addPoint(chart, value) {
+    const now = new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    chart.data.labels.push(now);
+    chart.data.datasets[0].data.push(value);
+    if (chart.data.labels.length > MAX_POINTS) { chart.data.labels.shift(); chart.data.datasets[0].data.shift(); }
+    chart.update();
+  }
+
+  function timeNow() { return 'Updated ' + new Date().toLocaleTimeString(); }
+
+  const client = mqtt.connect('wss://broker.hivemq.com:8884/mqtt', {
+    clientId: 'web_hpone_' + Math.random().toString(16).slice(2,8), clean:true
+  });
+
+  client.on('connect', () => {
+    dot.className='dot connected'; connLabel.textContent='CONNECTED · HiveMQ';
+    btnOn.disabled=false; btnOff.disabled=false;
+    client.subscribe(TOPIC_STATE);
+    client.subscribe(TOPIC_TEMP);
+    client.subscribe(TOPIC_HUMID);
+  });
+
+  client.on('offline', () => {
+    dot.className='dot disconnected'; connLabel.textContent='DISCONNECTED';
+    btnOn.disabled=true; btnOff.disabled=true;
+  });
+
+  client.on('message', (topic, message) => {
+    const val = message.toString().trim();
+    if (topic === TOPIC_STATE) {
+      if (val==='ON') { bulb.className='bulb on'; ledStatus.textContent='ON'; ledStatus.className='led-status on'; }
+      else            { bulb.className='bulb';    ledStatus.textContent='OFF'; ledStatus.className='led-status off'; }
+    }
+    if (topic === TOPIC_TEMP) {
+      const n=parseFloat(val);
+      document.getElementById('tempVal').textContent=n.toFixed(1);
+      document.getElementById('tempBar').style.width=Math.min(Math.max(n/50*100,0),100)+'%';
+      document.getElementById('tempTime').textContent=timeNow();
+      addPoint(tempChart,n);
+    }
+    if (topic === TOPIC_HUMID) {
+      const n=parseFloat(val);
+      document.getElementById('humidVal').textContent=n.toFixed(1);
+      document.getElementById('humidBar').style.width=Math.min(Math.max(n,0),100)+'%';
+      document.getElementById('humidTime').textContent=timeNow();
+      addPoint(humidChart,n);
+    }
+  });
+
+  function send(cmd) { if(client.connected) client.publish(TOPIC_COMMAND,cmd); }
+</script>
+</body>
+</html>
