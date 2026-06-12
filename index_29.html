@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32 Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.3.4/mqtt.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@300;500;600&display=swap');
+  :root { --on:#00ffaa; --bg:#0a0a0f; --panel:#11111c; --border:#1e1e32; --text:#c8c8e0; --warn:#ff4466; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { height:100%; overflow:hidden; background:var(--bg); font-family:'Rajdhani',sans-serif; color:var(--text); }
+  body::before {
+    content:''; position:fixed; inset:0;
+    background-image: linear-gradient(rgba(0,255,170,0.03) 1px,transparent 1px),
+                      linear-gradient(90deg,rgba(0,255,170,0.03) 1px,transparent 1px);
+    background-size:40px 40px; pointer-events:none; z-index:0;
+  }
+
+  .page {
+    position:relative; z-index:1; height:100vh;
+    display:grid;
+    grid-template-rows: 44px 1fr 1fr auto;
+    grid-template-columns: 1fr 1fr 180px;
+    gap:10px; padding:12px 16px;
+  }
+
+  /* Header */
+  header { grid-column:1/4; display:flex; align-items:center; justify-content:space-between; }
+  header h1 { font-family:'Share Tech Mono',monospace; font-size:0.85rem; letter-spacing:0.3em; color:rgba(200,200,224,0.35); text-transform:uppercase; }
+  .conn-bar { display:flex; align-items:center; gap:8px; font-family:'Share Tech Mono',monospace; font-size:0.65rem; letter-spacing:0.12em; color:rgba(200,200,224,0.3); }
+  .dot { width:7px; height:7px; border-radius:50%; background:#333; transition:all 0.3s; }
+  .dot.connected    { background:var(--on); box-shadow:0 0 7px rgba(0,255,170,0.8); animation:blink 2s ease-in-out infinite; }
+  .dot.disconnected { background:#ff4466; }
+  .dot.connecting   { background:#ffaa00; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.35} }
+
+  /* Card */
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:16px; display:flex; flex-direction:column; gap:12px; min-height:0; overflow:hidden; }
+  .card-label { font-family:'Share Tech Mono',monospace; font-size:0.62rem; letter-spacing:0.25em; text-transform:uppercase; color:rgba(200,200,224,0.3); flex-shrink:0; }
+
+  /* LED card — row2, col1 */
+  .led-card { grid-row:2; grid-column:1; align-items:center; justify-content:center; }
+  .bulb { width:100px; height:100px; border-radius:50%; border:2px solid var(--border); background:#0d0d18; position:relative; transition:all 0.4s cubic-bezier(0.23,1,0.32,1); display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+  .bulb::before { content:''; width:48px; height:48px; border-radius:50%; background:#1a1a2e; transition:all 0.4s cubic-bezier(0.23,1,0.32,1); }
+  .bulb.on { border-color:var(--on); box-shadow:0 0 24px rgba(0,255,170,0.4),0 0 60px rgba(0,255,170,0.15),inset 0 0 28px rgba(0,255,170,0.1); }
+  .bulb.on::before { background:var(--on); box-shadow:0 0 16px rgba(0,255,170,0.9),0 0 40px rgba(0,255,170,0.4); }
+  .bulb.on::after { content:''; position:absolute; inset:-10px; border-radius:50%; border:1px solid rgba(0,255,170,0.25); animation:pulse 2s ease-out infinite; }
+  @keyframes pulse { 0%{transform:scale(1);opacity:0.55} 100%{transform:scale(1.3);opacity:0} }
+  .led-status { font-family:'Share Tech Mono',monospace; font-size:1.4rem; letter-spacing:0.2em; transition:color 0.4s; }
+  .led-status.on { color:var(--on); } .led-status.off { color:rgba(200,200,224,0.2); }
+  .controls { display:flex; gap:10px; }
+  .btn { font-family:'Share Tech Mono',monospace; font-size:0.65rem; letter-spacing:0.12em; padding:8px 16px; border-radius:4px; cursor:pointer; text-transform:uppercase; transition:all 0.18s; border:1px solid; }
+  .btn-on  { background:rgba(0,255,170,0.08); border-color:rgba(0,255,170,0.35); color:var(--on); }
+  .btn-on:hover  { background:rgba(0,255,170,0.18); }
+  .btn-off { background:rgba(200,200,224,0.04); border-color:rgba(200,200,224,0.18); color:rgba(200,200,224,0.4); }
+  .btn-off:hover { background:rgba(200,200,224,0.09); color:rgba(200,200,224,0.7); }
+  .btn:active { transform:scale(0.95); }
+  .btn:disabled { opacity:0.3; cursor:not-allowed; }
+
+  /* Gauge card — row3, col1 */
+  .gauge-card { grid-row:3; grid-column:1; align-items:center; }
+  .gauge-wrap { position:relative; width:300px; height:170px; flex-shrink:0; }
+  canvas#gauge { width:100%; height:100%; }
+  .gauge-value { position:absolute; bottom:14px; left:50%; transform:translateX(-50%); font-family:'Share Tech Mono',monospace; font-size:1.8rem; letter-spacing:0.05em; color:#f0c040; text-shadow:0 0 16px rgba(240,192,64,0.5); white-space:nowrap; }
+  .gauge-unit { font-size:0.7rem; opacity:0.5; margin-left:2px; }
+
+  /* RGB card — row2+3, col2 */
+  .rgb-card { grid-row:2/4; grid-column:2; justify-content:center; }
+  .rgb-preview { width:56px; height:56px; border-radius:50%; border:2px solid var(--border); flex-shrink:0; transition:background 0.3s ease; box-shadow:0 0 16px rgba(0,0,0,0.4); }
+  .rgb-header { display:flex; align-items:center; gap:14px; }
+  .rgb-hex { font-family:'Share Tech Mono',monospace; font-size:0.75rem; color:rgba(200,200,224,0.4); letter-spacing:0.1em; }
+  .slider-row { display:flex; align-items:center; gap:12px; }
+  .slider-label { font-family:'Share Tech Mono',monospace; font-size:0.7rem; letter-spacing:0.15em; width:14px; flex-shrink:0; }
+  .slider-label.r { color:#ff6b6b; } .slider-label.g { color:#00ffaa; } .slider-label.b { color:#4ecdc4; }
+  .slider-val { font-family:'Share Tech Mono',monospace; font-size:0.7rem; color:rgba(200,200,224,0.4); width:28px; text-align:right; flex-shrink:0; }
+  input[type=range] { flex:1; -webkit-appearance:none; height:5px; border-radius:3px; outline:none; cursor:pointer; background:rgba(255,255,255,0.07); }
+  input[type=range].r::-webkit-slider-thumb { -webkit-appearance:none; width:14px; height:14px; border-radius:50%; background:#ff6b6b; box-shadow:0 0 6px rgba(255,107,107,0.6); }
+  input[type=range].g::-webkit-slider-thumb { -webkit-appearance:none; width:14px; height:14px; border-radius:50%; background:#00ffaa; box-shadow:0 0 6px rgba(0,255,170,0.6); }
+  input[type=range].b::-webkit-slider-thumb { -webkit-appearance:none; width:14px; height:14px; border-radius:50%; background:#4ecdc4; box-shadow:0 0 6px rgba(78,205,196,0.6); }
+  input[type=range].r::-webkit-slider-runnable-track { background:linear-gradient(90deg,#1a0a0a,#ff6b6b); border-radius:3px; height:5px; }
+  input[type=range].g::-webkit-slider-runnable-track { background:linear-gradient(90deg,#0a1a0f,#00ffaa); border-radius:3px; height:5px; }
+  input[type=range].b::-webkit-slider-runnable-track { background:linear-gradient(90deg,#0a0f1a,#4ecdc4); border-radius:3px; height:5px; }
+
+  /* Music widget — row2, col3 (small top-right) */
+  .music-widget {
+    grid-row:2; grid-column:3;
+    background:var(--panel); border:1px solid var(--border); border-radius:10px;
+    padding:12px; display:flex; flex-direction:column; gap:8px; min-height:0; overflow:hidden;
+  }
+  .music-title { font-family:'Share Tech Mono',monospace; font-size:0.58rem; letter-spacing:0.2em; text-transform:uppercase; color:rgba(200,200,224,0.3); flex-shrink:0; }
+  .now-playing { font-family:'Share Tech Mono',monospace; font-size:0.62rem; color:var(--on); flex-shrink:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .play-btn {
+    font-family:'Share Tech Mono',monospace; font-size:0.62rem; letter-spacing:0.1em;
+    padding:7px 10px; border-radius:6px; cursor:pointer; text-align:center;
+    background:rgba(0,255,170,0.08); border:1px solid rgba(0,255,170,0.3); color:var(--on);
+    transition:all 0.18s; text-transform:uppercase;
+  }
+  .play-btn:hover { background:rgba(0,255,170,0.18); }
+  .play-btn.playing { background:rgba(0,255,170,0.18); border-color:rgba(0,255,170,0.6); }
+  .stop-btn {
+    font-family:'Share Tech Mono',monospace; font-size:0.62rem; letter-spacing:0.1em;
+    padding:7px 10px; border-radius:6px; cursor:pointer; text-align:center;
+    background:rgba(255,68,102,0.08); border:1px solid rgba(255,68,102,0.3); color:#ff4466;
+    transition:all 0.18s; text-transform:uppercase;
+  }
+  .stop-btn:hover { background:rgba(255,68,102,0.18); }
+
+  /* RGB card row 3 col 3 empty filler */
+  .filler { grid-row:3; grid-column:3; }
+
+  /* RGB bottom row spans cols 1-3 */
+  .rgb-bottom { grid-row:4; grid-column:1/4; }
+
+  /* Warning overlay */
+  .warning-overlay { position:fixed; inset:0; z-index:999; display:flex; align-items:center; justify-content:center; pointer-events:none; opacity:0; transition:opacity 0.3s; }
+  .warning-overlay.show { opacity:1; }
+  .warning-box { background:rgba(10,5,15,0.92); border:2px solid var(--warn); border-radius:16px; padding:28px 48px; text-align:center; box-shadow:0 0 40px rgba(255,68,102,0.4),0 0 80px rgba(255,68,102,0.15); animation:warnpulse 1.2s ease-in-out infinite; }
+  @keyframes warnpulse { 0%,100%{box-shadow:0 0 40px rgba(255,68,102,0.4)} 50%{box-shadow:0 0 70px rgba(255,68,102,0.7)} }
+  .warning-icon { font-size:2.5rem; margin-bottom:10px; }
+  .warning-title { font-family:'Share Tech Mono',monospace; font-size:1rem; letter-spacing:0.2em; color:var(--warn); text-transform:uppercase; margin-bottom:6px; }
+  .warning-sub { font-family:'Share Tech Mono',monospace; font-size:0.7rem; color:rgba(255,68,102,0.6); letter-spacing:0.1em; }
+</style>
+</head>
+<body>
+
+<div class="warning-overlay" id="warningOverlay">
+  <div class="warning-box">
+    <div class="warning-icon">⚠️</div>
+    <div class="warning-title">Warning</div>
+    <div class="warning-sub">POTENTIOMETER ABOVE 90%</div>
+  </div>
+</div>
+
+<div class="page">
+
+  <!-- Header -->
+  <header>
+    <h1>ESP32 &nbsp;/&nbsp; Dashboard</h1>
+    <div class="conn-bar">
+      <div class="dot connecting" id="dot"></div>
+      <span id="connLabel">CONNECTING...</span>
+    </div>
+  </header>
+
+  <!-- LED Card -->
+  <div class="card led-card">
+    <div class="card-label">LED Control</div>
+    <div class="bulb" id="bulb"></div>
+    <div class="led-status off" id="ledStatus">OFF</div>
+    <div class="controls">
+      <button class="btn btn-on"  id="btnOn"  onclick="ledCmd('ON')"  disabled>ON</button>
+      <button class="btn btn-off" id="btnOff" onclick="ledCmd('OFF')" disabled>OFF</button>
+    </div>
+  </div>
+
+  <!-- Gauge Card -->
+  <div class="card gauge-card">
+    <div class="card-label">Brightness Level</div>
+    <div class="gauge-wrap">
+      <canvas id="gauge" width="300" height="170"></canvas>
+      <div class="gauge-value"><span id="gaugeVal">0</span><span class="gauge-unit">%</span></div>
+    </div>
+  </div>
+
+  <!-- RGB Card -->
+  <div class="card rgb-card">
+    <div class="card-label">RGB Light</div>
+    <div class="rgb-header">
+      <div class="rgb-preview" id="rgbPreview"></div>
+      <div class="rgb-hex" id="rgbHex">#000000</div>
+    </div>
+    <div class="slider-row">
+      <span class="slider-label r">R</span>
+      <input type="range" class="r" min="0" max="255" value="0" id="sliderR" oninput="onSlider()">
+      <span class="slider-val" id="valR">0</span>
+    </div>
+    <div class="slider-row">
+      <span class="slider-label g">G</span>
+      <input type="range" class="g" min="0" max="255" value="0" id="sliderG" oninput="onSlider()">
+      <span class="slider-val" id="valG">0</span>
+    </div>
+    <div class="slider-row">
+      <span class="slider-label b">B</span>
+      <input type="range" class="b" min="0" max="255" value="0" id="sliderB" oninput="onSlider()">
+      <span class="slider-val" id="valB">0</span>
+    </div>
+  </div>
+
+  <!-- Music Widget (small, top-right) -->
+  <div class="music-widget">
+    <div class="music-title">♪ Music</div>
+    <div class="now-playing" id="nowPlaying">Nothing playing</div>
+    <button class="play-btn" id="playBtn" onclick="togglePlay()">▶ Pink Panther</button>
+    <button class="stop-btn" onclick="stopSong()">■ Stop</button>
+  </div>
+
+</div>
+
+<script>
+  const TOPIC_LED_STATE   = 'hpone_esp32_001/led/state';
+  const TOPIC_LED_COMMAND = 'hpone_esp32_001/led/command';
+  const TOPIC_POT         = 'hpone_esp32_001/pot/level';
+  const TOPIC_MUSIC_PLAY  = 'hpone_esp32_001/music/play';
+  const TOPIC_RGB         = 'hpone_esp32_001/rgb';
+
+  const dot            = document.getElementById('dot');
+  const connLabel      = document.getElementById('connLabel');
+  const btnOn          = document.getElementById('btnOn');
+  const btnOff         = document.getElementById('btnOff');
+  const bulb           = document.getElementById('bulb');
+  const ledStatus      = document.getElementById('ledStatus');
+  const gaugeVal       = document.getElementById('gaugeVal');
+  const nowPlaying     = document.getElementById('nowPlaying');
+  const playBtn        = document.getElementById('playBtn');
+  const warningOverlay = document.getElementById('warningOverlay');
+  const canvas         = document.getElementById('gauge');
+  const ctx            = canvas.getContext('2d');
+
+  let currentLevel = 0, targetLevel = 0;
+  let isPlaying = false;
+
+  // ── Gauge ──
+  function drawGauge(pct) {
+    const W = canvas.width, H = canvas.height;
+    const cx = W/2, cy = H;
+    const r = 110;
+    const startA = (210*Math.PI)/180;
+    const endA   = (330*Math.PI)/180;
+    const valueA = startA + (pct/100)*(endA-startA);
+    ctx.clearRect(0,0,W,H);
+    ctx.beginPath(); ctx.arc(cx,cy,r,startA,endA,false);
+    ctx.strokeStyle='rgba(255,255,255,0.07)'; ctx.lineWidth=12; ctx.lineCap='round'; ctx.stroke();
+    if (pct>0) {
+      const grad=ctx.createLinearGradient(cx-r,cy,cx+r,cy);
+      grad.addColorStop(0,'#00ffaa'); grad.addColorStop(0.5,'#f0c040'); grad.addColorStop(1,'#ff4466');
+      ctx.beginPath(); ctx.arc(cx,cy,r,startA,valueA,false);
+      ctx.strokeStyle=grad; ctx.lineWidth=12; ctx.lineCap='round'; ctx.stroke();
+    }
+    for (let i=0;i<=10;i++) {
+      const a=startA+(i/10)*(endA-startA); const isMajor=i%2===0;
+      const x1=cx+(r+6)*Math.cos(a), y1=cy+(r+6)*Math.sin(a);
+      const x2=cx+(r+6-(isMajor?14:8))*Math.cos(a), y2=cy+(r+6-(isMajor?14:8))*Math.sin(a);
+      ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2);
+      ctx.strokeStyle=isMajor?'rgba(200,200,224,0.5)':'rgba(200,200,224,0.2)';
+      ctx.lineWidth=isMajor?2:1; ctx.stroke();
+      if (isMajor) {
+        ctx.font='9px Share Tech Mono,monospace'; ctx.fillStyle='rgba(200,200,224,0.4)';
+        ctx.textAlign='center'; ctx.textBaseline='middle';
+        ctx.fillText(i*10, cx+(r+22)*Math.cos(a), cy+(r+22)*Math.sin(a));
+      }
+    }
+    ctx.save(); ctx.translate(cx,cy); ctx.rotate(valueA);
+    ctx.beginPath(); ctx.moveTo(0,4); ctx.lineTo(r-20,0); ctx.lineTo(0,-4);
+    ctx.fillStyle='#f0c040'; ctx.shadowColor='rgba(240,192,64,0.8)'; ctx.shadowBlur=14; ctx.fill();
+    ctx.restore();
+    ctx.beginPath(); ctx.arc(cx,cy,9,0,Math.PI*2); ctx.fillStyle='#1e1e32'; ctx.shadowBlur=0; ctx.fill();
+    ctx.beginPath(); ctx.arc(cx,cy,5,0,Math.PI*2); ctx.fillStyle='#f0c040'; ctx.shadowColor='rgba(240,192,64,0.6)'; ctx.shadowBlur=8; ctx.fill();
+  }
+  function animateGauge() {
+    const diff=targetLevel-currentLevel;
+    currentLevel=Math.abs(diff)<0.5?targetLevel:currentLevel+diff*0.12;
+    drawGauge(currentLevel); gaugeVal.textContent=Math.round(currentLevel);
+    requestAnimationFrame(animateGauge);
+  }
+  animateGauge();
+
+  // ── MQTT ──
+  const client = mqtt.connect('wss://broker.hivemq.com:8884/mqtt', {
+    clientId:'web_hpone_'+Math.random().toString(16).slice(2,8), clean:true
+  });
+  client.on('connect', () => {
+    dot.className='dot connected'; connLabel.textContent='CONNECTED · HiveMQ';
+    btnOn.disabled=false; btnOff.disabled=false;
+    client.subscribe(TOPIC_LED_STATE);
+    client.subscribe(TOPIC_POT);
+  });
+  client.on('offline', () => {
+    dot.className='dot disconnected'; connLabel.textContent='DISCONNECTED';
+    btnOn.disabled=true; btnOff.disabled=true;
+  });
+  client.on('message', (topic, message) => {
+    const val = message.toString().trim();
+    if (topic===TOPIC_LED_STATE) {
+      if (val==='ON') { bulb.className='bulb on'; ledStatus.textContent='ON'; ledStatus.className='led-status on'; }
+      else            { bulb.className='bulb';    ledStatus.textContent='OFF'; ledStatus.className='led-status off'; }
+    }
+    if (topic===TOPIC_POT) {
+      targetLevel=parseFloat(val);
+      if (parseFloat(val)>=90) warningOverlay.classList.add('show');
+      else                     warningOverlay.classList.remove('show');
+    }
+  });
+
+  // ── Controls ──
+  function ledCmd(cmd) { if(client.connected) client.publish(TOPIC_LED_COMMAND,cmd); }
+
+  function togglePlay() {
+    if (!client.connected) return;
+    if (!isPlaying) {
+      isPlaying=true;
+      playBtn.textContent='▶ Pink Panther';
+      playBtn.classList.add('playing');
+      nowPlaying.textContent='♪ Pink Panther';
+      client.publish(TOPIC_MUSIC_PLAY,'pp');
+    }
+  }
+  function stopSong() {
+    if (!client.connected) return;
+    isPlaying=false;
+    playBtn.classList.remove('playing');
+    nowPlaying.textContent='Nothing playing';
+    client.publish(TOPIC_MUSIC_PLAY,'stop');
+  }
+
+  // ── RGB ──
+  const rgbPreview=document.getElementById('rgbPreview');
+  const rgbHex=document.getElementById('rgbHex');
+  let rgbTimer=null;
+  function onSlider() {
+    const r=parseInt(document.getElementById('sliderR').value);
+    const g=parseInt(document.getElementById('sliderG').value);
+    const b=parseInt(document.getElementById('sliderB').value);
+    document.getElementById('valR').textContent=r;
+    document.getElementById('valG').textContent=g;
+    document.getElementById('valB').textContent=b;
+    const hex='#'+[r,g,b].map(v=>v.toString(16).padStart(2,'0')).join('');
+    rgbPreview.style.background=hex;
+    rgbPreview.style.boxShadow=`0 0 20px ${hex}88`;
+    rgbHex.textContent=hex.toUpperCase();
+    clearTimeout(rgbTimer);
+    rgbTimer=setTimeout(()=>{ if(client.connected) client.publish(TOPIC_RGB,`${r},${g},${b}`); },80);
+  }
+</script>
+</body>
+</html>
